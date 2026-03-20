@@ -37,11 +37,11 @@ public class AccountController {
     @Operation(summary = "출금 처리", description = "카드 번호로 연결된 계좌에서 금액을 출금합니다.")
     @PostMapping("/withdraw")
     public ResponseEntity<EntityModel<DebitResponse>> processDebit(@RequestBody DebitRequest request) {
-        log.info("출금 요청 수신: cardNumber={}, amount={}", request.getCardNumber(), request.getAmount());
+        log.info("출금 요청 수신: cardNum={}, amount={}", request.getCardNum(), request.getAmount());
 
         try {
             // 0. 입력 검증
-            if (request.getCardNumber() == null || request.getCardNumber().trim().isEmpty()) {
+            if (request.getCardNum() == null || request.getCardNum().trim().isEmpty()) {
                 log.warn("출금 실패: 카드 번호 누락");
                 return buildErrorResponse("96", "카드 번호는 필수입니다", HttpStatus.BAD_REQUEST);
             }
@@ -51,7 +51,7 @@ public class AccountController {
             }
 
             // [Step 1] 카드 번호로 연동된 계좌 조회
-            Account account = accountService.findAccountByCardNumber(request.getCardNumber());
+            Account account = accountService.findAccountByCardNumber(request.getCardNum());
             String accountNum = account.getAccountNum();
 
             // [Step 2] 잔액 조회 및 출금 가능 여부 사전 검증
