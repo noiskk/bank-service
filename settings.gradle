@@ -1,0 +1,3 @@
+rootProject.name = 'bank-service'
+include ':common'
+project(':common').projectDir = file('../common')
