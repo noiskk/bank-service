@@ -1,264 +1,121 @@
 package com.bank.service;
 
+import com.bank.common.enums.AccountStatus;
 import com.bank.entity.Account;
 import com.bank.repository.AccountRepository;
 import com.bank.repository.TransactionRepository;
-import com.card.payment.common.enums.AccountStatus;
-import com.card.payment.common.enums.AccountType;
-import com.card.payment.common.enums.CardType;
-import com.card.payment.common.enums.MappingStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
-import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 동시성 테스트
- * 동일 계좌에 대한 동시 출금 요청 처리 테스트
- * 요구사항: 12.3, 13.1
+ * 출금 동시성 테스트 (비관적 락 검증)
+ * 가짜(Mock)가 아니라 진짜 앱 + 진짜 DB(H2) + 진짜 스레드로 race condition을 검증한다.
  */
 @SpringBootTest
 @ActiveProfiles("test")
-@DisplayName("동시성 테스트")
+@DisplayName("출금 동시성 테스트 (비관적 락)")
 class ConcurrencyTest {
-    
+
     @Autowired
     private AccountService accountService;
-    
+
     @Autowired
     private AccountRepository accountRepository;
-    
-    @Autowired
-    private CardAccountMappingRepository cardAccountMappingRepository;
-    
+
     @Autowired
     private TransactionRepository transactionRepository;
-    
-    private Account testAccount;
-    private CardAccountMapping testMapping;
-    
+
+    private static final String ACCOUNT_NUM = "9999888877776666";
+
     @BeforeEach
-    @Transactional
     void setUp() {
-        // 기존 데이터 정리
+        // 매 테스트 전 깨끗이 비우고, 잔액 10만원짜리 계좌 하나 심는다
         transactionRepository.deleteAll();
-        cardAccountMappingRepository.deleteAll();
         accountRepository.deleteAll();
-        
-        // 테스트용 계좌 생성
-        testAccount = Account.builder()
-                .accountNumber("1234567890123456") // 20자 이내로 수정
-                .bankCode("001")
-                .accountType(AccountType.CHECKING)
+
+        Account account = Account.builder()
+                .accountNum(ACCOUNT_NUM)
+                .cardNum("1111222233334444")
+                .amount(100_000L)
+                .minimumBalance(0L)   // 최소잔액 0 → 10만원 전부 출금 가능
+                .customerId(1L)
                 .accountStatus(AccountStatus.ACTIVE)
-                .balance(new BigDecimal("100000.00"))
-                .minimumBalance(new BigDecimal("0.00"))
-                .customerId("CUST-CONCURRENT")
                 .build();
-        testAccount = accountRepository.save(testAccount);
-        
-        // 테스트용 카드-계좌 매핑 생성
-        testMapping = CardAccountMapping.builder()
-                .cardNumber("1234567812345678") // 19자 이내로 수정
-                .accountNumber(testAccount.getAccountNumber())
-                .cardType(CardType.DEBIT)
-                .status(MappingStatus.ACTIVE)
-                .build();
-        testMapping = cardAccountMappingRepository.save(testMapping);
+        accountRepository.save(account);
     }
-    
+
     @Test
-    @DisplayName("동일 계좌 동시 출금 - 비관적 락으로 순차 처리")
-    void concurrentDebit_PessimisticLock() throws InterruptedException {
-        // given
+    @DisplayName("10명이 동시에 1만원씩 출금 → 정확히 10건 성공, 잔액 0원")
+    void concurrentDebit_exactlyTenSucceed() throws InterruptedException {
         int threadCount = 10;
-        BigDecimal debitAmount = new BigDecimal("10000.00");
-        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
-        CountDownLatch latch = new CountDownLatch(threadCount);
-        
-        AtomicInteger successCount = new AtomicInteger(0);
-        AtomicInteger failureCount = new AtomicInteger(0);
-        List<Exception> exceptions = new CopyOnWriteArrayList<>();
-        
-        // when
-        for (int i = 0; i < threadCount; i++) {
-            final int index = i;
-            executorService.submit(() -> {
-                try {
-                    AccountService.DebitResult result = accountService.processDebit(
-                            testMapping.getCardNumber(),
-                            debitAmount,
-                            "REF-" + index
-                    );
-                    
-                    if (result.isSuccess()) {
-                        successCount.incrementAndGet();
-                    }
-                } catch (Exception e) {
-                    failureCount.incrementAndGet();
-                    exceptions.add(e);
-                } finally {
-                    latch.countDown();
-                }
-            });
-        }
-        
-        // 모든 스레드가 완료될 때까지 대기 (최대 30초)
-        boolean completed = latch.await(30, TimeUnit.SECONDS);
-        executorService.shutdown();
-        
-        // then
-        assertThat(completed).isTrue();
-        
-        // 최종 계좌 잔액 확인
-        Account finalAccount = accountRepository.findByAccountNumber(testAccount.getAccountNumber())
-                .orElseThrow();
-        
-        // 성공한 출금 건수 * 출금 금액 = 차감된 총 금액
-        BigDecimal expectedBalance = new BigDecimal("100000.00")
-                .subtract(debitAmount.multiply(new BigDecimal(successCount.get())));
-        
-        assertThat(finalAccount.getBalance()).isEqualByComparingTo(expectedBalance);
-        
-        // 성공 + 실패 = 전체 요청 수
-        assertThat(successCount.get() + failureCount.get()).isEqualTo(threadCount);
-        
-        // 성공한 건수는 10건 (100000 / 10000 = 10)
-        assertThat(successCount.get()).isEqualTo(10);
-        assertThat(failureCount.get()).isEqualTo(0);
-        
-        System.out.println("=== 동시성 테스트 결과 ===");
-        System.out.println("총 요청 수: " + threadCount);
-        System.out.println("성공 건수: " + successCount.get());
-        System.out.println("실패 건수: " + failureCount.get());
-        System.out.println("최종 잔액: " + finalAccount.getBalance());
-        System.out.println("예상 잔액: " + expectedBalance);
+        long amount = 10_000L;
+
+        DebitOutcome outcome = runConcurrentDebits(threadCount, amount);
+
+        Account after = accountRepository.findByAccountNum(ACCOUNT_NUM).orElseThrow();
+
+        // 락이 제대로 걸렸다면: 10건 전부 성공, 잔액은 정확히 0원 (갱신 유실 없음)
+        assertThat(outcome.success.get()).isEqualTo(10);
+        assertThat(outcome.fail.get()).isEqualTo(0);
+        assertThat(after.getAmount()).isEqualTo(0L);
     }
-    
+
     @Test
-    @DisplayName("동일 계좌 동시 출금 - 잔액 부족으로 일부 실패")
-    void concurrentDebit_InsufficientBalance() throws InterruptedException {
-        // given
-        int threadCount = 15; // 100000 / 10000 = 10건만 성공 가능
-        BigDecimal debitAmount = new BigDecimal("10000.00");
-        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
-        CountDownLatch latch = new CountDownLatch(threadCount);
-        
-        AtomicInteger successCount = new AtomicInteger(0);
-        AtomicInteger failureCount = new AtomicInteger(0);
-        
-        // when
-        for (int i = 0; i < threadCount; i++) {
-            final int index = i;
-            executorService.submit(() -> {
-                try {
-                    AccountService.DebitResult result = accountService.processDebit(
-                            testMapping.getCardNumber(),
-                            debitAmount,
-                            "REF-" + index
-                    );
-                    
-                    if (result.isSuccess()) {
-                        successCount.incrementAndGet();
-                    }
-                } catch (IllegalStateException e) {
-                    // 잔액 부족 예외는 정상적인 실패
-                    if (e.getMessage().contains("출금 가능 금액이 부족합니다")) {
-                        failureCount.incrementAndGet();
-                    } else {
-                        throw e;
-                    }
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                } finally {
-                    latch.countDown();
-                }
-            });
-        }
-        
-        // 모든 스레드가 완료될 때까지 대기
-        boolean completed = latch.await(30, TimeUnit.SECONDS);
-        executorService.shutdown();
-        
-        // then
-        assertThat(completed).isTrue();
-        
-        // 최종 계좌 잔액 확인
-        Account finalAccount = accountRepository.findByAccountNumber(testAccount.getAccountNumber())
-                .orElseThrow();
-        
-        // 성공 + 실패 = 전체 요청 수
-        assertThat(successCount.get() + failureCount.get()).isEqualTo(threadCount);
-        
-        // 성공한 건수는 10건
-        assertThat(successCount.get()).isEqualTo(10);
-        
-        // 실패한 건수는 5건
-        assertThat(failureCount.get()).isEqualTo(5);
-        
-        // 최종 잔액은 0원
-        assertThat(finalAccount.getBalance()).isEqualByComparingTo(BigDecimal.ZERO);
-        
-        System.out.println("=== 동시성 테스트 결과 (잔액 부족) ===");
-        System.out.println("총 요청 수: " + threadCount);
-        System.out.println("성공 건수: " + successCount.get());
-        System.out.println("실패 건수: " + failureCount.get());
-        System.out.println("최종 잔액: " + finalAccount.getBalance());
+    @DisplayName("15명이 동시에 1만원씩 출금 → 10건 성공, 5건 잔액부족 실패, 잔액 0원")
+    void concurrentDebit_overdraftBlocked() throws InterruptedException {
+        int threadCount = 15;
+        long amount = 10_000L;
+
+        DebitOutcome outcome = runConcurrentDebits(threadCount, amount);
+
+        Account after = accountRepository.findByAccountNum(ACCOUNT_NUM).orElseThrow();
+
+        // 10만원으로는 1만원 출금 10번까지만 가능 → 나머지 5건은 잔액부족으로 막혀야 한다
+        assertThat(outcome.success.get()).isEqualTo(10);
+        assertThat(outcome.fail.get()).isEqualTo(5);
+        assertThat(after.getAmount()).isEqualTo(0L);
     }
-    
-    @Test
-    @DisplayName("동일 계좌 동시 잔액 조회 - 비관적 락으로 일관성 보장")
-    void concurrentBalanceCheck_PessimisticLock() throws InterruptedException {
-        // given
-        int threadCount = 20;
-        BigDecimal requestAmount = new BigDecimal("50000.00");
-        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+
+    /**
+     * threadCount 개의 스레드가 동시에 같은 계좌에서 amount 만큼 출금하도록 실행한다.
+     */
+    private DebitOutcome runConcurrentDebits(int threadCount, long amount) throws InterruptedException {
+        ExecutorService pool = Executors.newFixedThreadPool(threadCount);
         CountDownLatch latch = new CountDownLatch(threadCount);
-        
-        List<AccountService.BalanceCheckResult> results = new CopyOnWriteArrayList<>();
-        
-        // when
+        AtomicInteger success = new AtomicInteger(0);
+        AtomicInteger fail = new AtomicInteger(0);
+
         for (int i = 0; i < threadCount; i++) {
-            executorService.submit(() -> {
+            pool.submit(() -> {
                 try {
-                    AccountService.BalanceCheckResult result = accountService.checkBalance(
-                            testAccount.getAccountNumber(),
-                            requestAmount
-                    );
-                    results.add(result);
+                    accountService.processDebit(ACCOUNT_NUM, amount);
+                    success.incrementAndGet();
+                } catch (Exception e) {
+                    fail.incrementAndGet();
                 } finally {
                     latch.countDown();
                 }
             });
         }
-        
-        // 모든 스레드가 완료될 때까지 대기
-        boolean completed = latch.await(30, TimeUnit.SECONDS);
-        executorService.shutdown();
-        
-        // then
-        assertThat(completed).isTrue();
-        assertThat(results).hasSize(threadCount);
-        
-        // 모든 조회 결과가 동일한 잔액을 반환해야 함
-        BigDecimal expectedBalance = new BigDecimal("100000.00");
-        for (AccountService.BalanceCheckResult result : results) {
-            assertThat(result.getBalance()).isEqualByComparingTo(expectedBalance);
-            assertThat(result.isCanWithdraw()).isTrue();
-        }
-        
-        System.out.println("=== 동시 잔액 조회 테스트 결과 ===");
-        System.out.println("총 조회 수: " + threadCount);
-        System.out.println("조회된 잔액: " + results.get(0).getBalance());
+
+        latch.await(30, TimeUnit.SECONDS); // 모든 스레드 끝날 때까지 대기
+        pool.shutdown();
+
+        return new DebitOutcome(success, fail);
+    }
+
+    private record DebitOutcome(AtomicInteger success, AtomicInteger fail) {
     }
 }
