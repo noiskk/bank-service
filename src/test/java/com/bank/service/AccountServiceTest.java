@@ -3,6 +3,10 @@ package com.bank.service;
 import com.bank.common.enums.AccountStatus;
 import com.bank.entity.Account;
 import com.bank.entity.Transaction;
+import com.bank.exception.AccountNotActiveException;
+import com.bank.exception.AccountNotFoundException;
+import com.bank.exception.InsufficientBalanceException;
+import com.bank.exception.InvalidRequestException;
 import com.bank.repository.AccountRepository;
 import com.bank.repository.TransactionRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -74,7 +78,7 @@ class AccountServiceTest {
     @DisplayName("카드번호로 계좌 조회 - 카드번호 null이면 예외")
     void findAccountByCardNumber_null() {
         assertThatThrownBy(() -> accountService.findAccountByCardNumber(null))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidRequestException.class)
                 .hasMessage("카드 번호는 필수입니다");
     }
 
@@ -85,7 +89,7 @@ class AccountServiceTest {
                 .thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> accountService.findAccountByCardNumber("9999"))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(AccountNotFoundException.class);
     }
 
     // ---------- checkBalance ----------
@@ -128,7 +132,7 @@ class AccountServiceTest {
                 .thenReturn(Optional.of(suspended));
 
         assertThatThrownBy(() -> accountService.checkBalance("1234567890", 10_000L))
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(AccountNotActiveException.class)
                 .hasMessageContaining("계좌 상태가 정상이 아닙니다");
     }
 
@@ -161,7 +165,7 @@ class AccountServiceTest {
 
         // 가용 9만원 초과 요청
         assertThatThrownBy(() -> accountService.processDebit("1234567890", 95_000L))
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(InsufficientBalanceException.class)
                 .hasMessage("출금 가능 금액이 부족합니다");
     }
 
@@ -178,7 +182,7 @@ class AccountServiceTest {
                 .thenReturn(Optional.of(suspended));
 
         assertThatThrownBy(() -> accountService.processDebit("1234567890", 10_000L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("출금 불가 계좌 상태입니다");
+                .isInstanceOf(AccountNotActiveException.class)
+                .hasMessageContaining("계좌 상태가 정상이 아닙니다");
     }
 }

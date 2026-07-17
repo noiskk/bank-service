@@ -2,6 +2,10 @@ package com.bank.service;
 
 import com.bank.entity.Account;
 import com.bank.entity.Transaction;
+import com.bank.exception.AccountNotActiveException;
+import com.bank.exception.AccountNotFoundException;
+import com.bank.exception.InsufficientBalanceException;
+import com.bank.exception.InvalidRequestException;
 import com.bank.repository.AccountRepository;
 import com.bank.repository.TransactionRepository;
 import com.bank.common.enums.AccountStatus;
@@ -31,13 +35,13 @@ public class AccountService {
     @Transactional(readOnly = true)
     public Account findAccountByCardNumber(String cardNumber) {
         if (cardNumber == null || cardNumber.trim().isEmpty()) {
-            throw new IllegalArgumentException("카드 번호는 필수입니다");
+            throw new InvalidRequestException("카드 번호는 필수입니다");
         }
 
         log.debug("카드 번호로 계좌 조회 시작: cardNumber={}", cardNumber);
 
         return accountRepository.findByCardNum(cardNumber)
-                .orElseThrow(() -> new IllegalStateException("해당 카드와 연동된 계좌를 찾을 수 없습니다: " + cardNumber));
+                .orElseThrow(() -> new AccountNotFoundException("해당 카드와 연동된 계좌를 찾을 수 없습니다: " + cardNumber));
     }
 
     /**
@@ -46,17 +50,17 @@ public class AccountService {
     @Transactional(readOnly = true)
     public BalanceCheckResult checkBalance(String accountNum, Long requestAmount) {
         if (accountNum == null || accountNum.trim().isEmpty()) {
-            throw new IllegalArgumentException("계좌 번호는 필수입니다");
+            throw new InvalidRequestException("계좌 번호는 필수입니다");
         }
         if (requestAmount == null || requestAmount <= 0) {
-            throw new IllegalArgumentException("요청 금액은 0보다 커야 합니다");
+            throw new InvalidRequestException("요청 금액은 0보다 커야 합니다");
         }
 
         Account account = accountRepository.findByAccountNum(accountNum)
-                .orElseThrow(() -> new IllegalStateException("계좌를 찾을 수 없습니다: " + accountNum));
+                .orElseThrow(() -> new AccountNotFoundException("계좌를 찾을 수 없습니다: " + accountNum));
 
         if (account.getAccountStatus() != AccountStatus.ACTIVE) {
-            throw new IllegalStateException("계좌 상태가 정상이 아닙니다: " + account.getAccountStatus());
+            throw new AccountNotActiveException(accountNum, account.getAccountStatus().toString());
         }
 
         Long availableBalance = account.getAvailableBalance();
@@ -78,24 +82,28 @@ public class AccountService {
     @Transactional
     public DebitResult processDebit(String accountNum, Long amount) {
         if (accountNum == null || accountNum.trim().isEmpty()) {
-            throw new IllegalArgumentException("계좌 번호는 필수입니다");
+            throw new InvalidRequestException("계좌 번호는 필수입니다");
         }
         if (amount == null || amount <= 0) {
-            throw new IllegalArgumentException("출금 금액은 0보다 커야 합니다");
+            throw new InvalidRequestException("출금 금액은 0보다 커야 합니다");
         }
 
         log.info("출금 처리 시작: accountNum={}, amount={}", accountNum, amount);
 
         // 비관적 락을 사용하여 계좌 조회 (출금 시점의 동시성 제어)
         Account account = accountRepository.findByAccountNumberWithLock(accountNum)
-                .orElseThrow(() -> new IllegalStateException("계좌를 찾을 수 없습니다: " + accountNum));
+                .orElseThrow(() -> new AccountNotFoundException("계좌를 찾을 수 없습니다: " + accountNum));
 
         if (account.getAccountStatus() != AccountStatus.ACTIVE) {
-            throw new IllegalStateException("출금 불가 계좌 상태입니다: " + account.getAccountStatus());
+            throw new AccountNotActiveException(accountNum, account.getAccountStatus().toString());
         }
 
         // 엔티티 내부 메서드를 통한 잔액 차감
-        account.debit(amount);
+        try{
+            account.debit(amount);
+        } catch (IllegalStateException e) {
+            throw new InsufficientBalanceException(accountNum, amount);
+        }
 
         // 거래 내역 저장
         String transactionId = generateTransactionId();
