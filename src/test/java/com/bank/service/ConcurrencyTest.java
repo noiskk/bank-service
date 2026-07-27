@@ -100,7 +100,7 @@ class ConcurrencyTest {
         for (int i = 0; i < threadCount; i++) {
             pool.submit(() -> {
                 try {
-                    accountService.processDebit(ACCOUNT_NUM, amount);
+                    accountService.processDebit(ACCOUNT_NUM, amount, "TX-CONCURRENT-" + System.nanoTime());
                     success.incrementAndGet();
                 } catch (Exception e) {
                     fail.incrementAndGet();

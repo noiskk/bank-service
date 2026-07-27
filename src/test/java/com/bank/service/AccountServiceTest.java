@@ -149,7 +149,7 @@ class AccountServiceTest {
                 .thenAnswer(inv -> inv.getArgument(0));
 
         AccountService.DebitResult result =
-                accountService.processDebit("1234567890", 50_000L);
+                accountService.processDebit("1234567890", 50_000L, "TX-TEST-1");
 
         assertThat(result.isSuccess()).isTrue();
         assertThat(result.getBalanceAfter()).isEqualTo(50_000L); // 10만 - 5만
@@ -164,7 +164,7 @@ class AccountServiceTest {
                 .thenReturn(Optional.of(testAccount));
 
         // 가용 9만원 초과 요청
-        assertThatThrownBy(() -> accountService.processDebit("1234567890", 95_000L))
+        assertThatThrownBy(() -> accountService.processDebit("1234567890", 95_000L, "TX-TEST-2"))
                 .isInstanceOf(InsufficientBalanceException.class)
                 .hasMessage("출금 가능 금액이 부족합니다");
     }
@@ -181,7 +181,7 @@ class AccountServiceTest {
         when(accountRepository.findByAccountNumberWithLock("1234567890"))
                 .thenReturn(Optional.of(suspended));
 
-        assertThatThrownBy(() -> accountService.processDebit("1234567890", 10_000L))
+        assertThatThrownBy(() -> accountService.processDebit("1234567890", 10_000L, "TX-TEST-3"))
                 .isInstanceOf(AccountNotActiveException.class)
                 .hasMessageContaining("계좌 상태가 정상이 아닙니다");
     }

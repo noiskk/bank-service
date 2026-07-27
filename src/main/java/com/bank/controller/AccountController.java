@@ -1,5 +1,7 @@
 package com.bank.controller;
 
+import com.bank.dto.CancelRequest;
+import com.bank.dto.CancelResponse;
 import com.bank.dto.DebitRequest;
 import com.bank.dto.DebitResponse;
 import com.bank.entity.Account;
@@ -51,7 +53,7 @@ public class AccountController {
         }
 
         // [Step 3] 실제 출금 처리 (비관적 락 적용됨)
-        var debitResult = accountService.processDebit(accountNum, request.getAmount());
+        var debitResult = accountService.processDebit(accountNum, request.getAmount(), request.getTransactionId());
 
         // 응답 생성
         DebitResponse response = DebitResponse.builder()
@@ -74,6 +76,26 @@ public class AccountController {
         entityModel.add(selfLink.withSelfRel());
 
         return ResponseEntity.ok(entityModel);
+    }
+
+    @Operation(summary = "출금 취소(망취소)",
+            description = "원거래 ID로 출금을 되돌립니다. 같은 원거래를 여러 번 요청해도 한 번만 반영됩니다.")
+    @PostMapping("/cancel")
+    public ResponseEntity<CancelResponse> cancelDebit(@RequestBody CancelRequest request) {
+        log.info("출금 취소 요청 수신: transactionId={}, amount={}", request.getTransactionId(), request.getAmount());
+
+        var result = accountService.cancelDebit(request.getTransactionId());
+
+        CancelResponse response = CancelResponse.builder()
+                .success(result.isSuccess())
+                .transactionId(request.getTransactionId())
+                .balanceAfter(result.getBalanceAfter())
+                .originalFound(result.isOriginalFound())
+                .responseCode("00")
+                .responseMessage(result.getMessage())
+                .build();
+
+        return ResponseEntity.ok(response);
     }
 
     /**

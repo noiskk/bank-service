@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -76,11 +77,16 @@ public class AccountService {
                 .build();
     }
 
+    /** 취소 거래를 원거래와 구분하기 위한 참조번호 접두사 */
+    private static final String CANCEL_REF_PREFIX = "CANCEL-";
+
     /**
      * [Step 3] 출금 처리 (비관적 락 적용)
+     *
+     * @param referenceId 카드사 거래번호. 거래 내역에 남겨두면 이후 취소·대사에서 원거래를 찾을 수 있다.
      */
     @Transactional
-    public DebitResult processDebit(String accountNum, Long amount) {
+    public DebitResult processDebit(String accountNum, Long amount, String referenceId) {
         if (accountNum == null || accountNum.trim().isEmpty()) {
             throw new InvalidRequestException("계좌 번호는 필수입니다");
         }
@@ -112,7 +118,7 @@ public class AccountService {
                 .accountNumber(account.getAccountNum())
                 .amount(amount)
                 .balanceAfter(account.getAmount())
-                //.referenceId(account.getCustomerId())
+                .referenceId(referenceId)
                 .description("카드 결제 출금")
                 .transactionDate(LocalDateTime.now())
                 .build();
@@ -131,8 +137,86 @@ public class AccountService {
                 .build();
     }
 
+    /**
+     * 출금 취소(망취소) 처리.
+     *
+     * 카드사가 승인 후 정합성 문제를 발견했을 때 호출한다. 세 가지 경우를 구분해서 응답한다:
+     *  1) 이미 취소된 거래   → 아무것도 하지 않고 성공 (같은 취소 요청이 반복돼도 잔액이 두 번 늘지 않는다)
+     *  2) 원거래가 없음      → 애초에 출금이 안 된 것. 취소할 게 없으므로 originalFound=false로 알려준다
+     *  3) 원거래 존재        → 잔액을 되돌리고 취소 거래를 기록
+     */
+    @Transactional
+    public CancelResult cancelDebit(String referenceId) {
+        if (referenceId == null || referenceId.trim().isEmpty()) {
+            throw new InvalidRequestException("원거래 ID는 필수입니다");
+        }
+
+        String cancelRef = CANCEL_REF_PREFIX + referenceId;
+
+        // 1) 멱등성: 이미 취소된 거래면 잔액을 다시 건드리지 않는다
+        Optional<Transaction> alreadyCancelled = transactionRepository.findByReferenceId(cancelRef);
+        if (alreadyCancelled.isPresent()) {
+            log.info("이미 취소된 거래 - referenceId={}", referenceId);
+            return CancelResult.builder()
+                    .success(true)
+                    .originalFound(true)
+                    .balanceAfter(alreadyCancelled.get().getBalanceAfter())
+                    .message("이미 취소된 거래입니다")
+                    .build();
+        }
+
+        // 2) 원거래가 없으면 출금 자체가 일어나지 않은 것
+        Optional<Transaction> original = transactionRepository.findByReferenceId(referenceId);
+        if (original.isEmpty()) {
+            log.info("원거래 없음 - referenceId={} (출금 미발생)", referenceId);
+            return CancelResult.builder()
+                    .success(true)
+                    .originalFound(false)
+                    .message("원거래가 존재하지 않습니다 (출금 미발생)")
+                    .build();
+        }
+
+        // 3) 실제 취소 — 요청 금액이 아니라 원거래 금액만큼 되돌린다
+        Transaction origin = original.get();
+        Account account = accountRepository.findByAccountNumberWithLock(origin.getAccountNumber())
+                .orElseThrow(() -> new AccountNotFoundException("계좌를 찾을 수 없습니다: " + origin.getAccountNumber()));
+
+        account.credit(origin.getAmount());
+
+        Transaction cancelTx = Transaction.builder()
+                .transactionId(generateTransactionId())
+                .accountNumber(account.getAccountNum())
+                .amount(origin.getAmount())
+                .balanceAfter(account.getAmount())
+                .referenceId(cancelRef)
+                .description("카드 결제 취소(망취소)")
+                .transactionDate(LocalDateTime.now())
+                .build();
+        transactionRepository.save(cancelTx);
+
+        log.info("출금 취소 완료 - referenceId={}, 복구금액={}, 잔액={}",
+                referenceId, origin.getAmount(), account.getAmount());
+
+        return CancelResult.builder()
+                .success(true)
+                .originalFound(true)
+                .balanceAfter(account.getAmount())
+                .message("취소 완료")
+                .build();
+    }
+
     private String generateTransactionId() {
         return "TXN-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20).toUpperCase();
+    }
+
+    @lombok.Builder
+    @lombok.Getter
+    @lombok.AllArgsConstructor
+    public static class CancelResult {
+        private boolean success;
+        private boolean originalFound;
+        private Long balanceAfter;
+        private String message;
     }
 
     @lombok.Builder
